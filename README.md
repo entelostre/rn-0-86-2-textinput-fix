@@ -87,6 +87,40 @@ publishReleasePublicationToMavenTempLocalRepository
 Toolchain: JDK 17, Node 22.23.1, NDK 27.1.12297006, CMake 3.30.5, Gradle 9.3.1.
 ABIs: arm64-v8a, armeabi-v7a, x86, x86_64.
 
-**Not byte-reproducible.** Absolute source paths from the build machine are embedded via
-`__FILE__` in assert/log macros. Rebuilding elsewhere produces a different binary. Verify with
-the marker check above rather than by comparing hashes.
+Build paths are remapped to `/react-native` via `-ffile-prefix-map`, so no build-machine
+paths are embedded. Byte-for-byte reproducibility is **unverified** (zip timestamps and entry
+ordering may still differ) — verify with the marker check above, not by comparing hashes.
+
+## Rebuilding for a new RN version
+
+Always on a dev machine, never in CI. Needs ~25 GB free and ~1h45m cold.
+
+1. In the app's `apps/physio/android/settings.gradle`, temporarily restore the composite build
+   (it is removed there, because the app normally consumes this artifact):
+   ```groovy
+   includeBuild('../../../node_modules/react-native') {
+       dependencySubstitution {
+           substitute(module("com.facebook.react:react-android")).using(project(":packages:react-native:ReactAndroid"))
+           substitute(module("com.facebook.react:react-native")).using(project(":packages:react-native:ReactAndroid"))
+           substitute(module("com.facebook.react:hermes-android")).using(project(":packages:react-native:ReactAndroid:hermes-engine"))
+           substitute(module("com.facebook.react:hermes-engine")).using(project(":packages:react-native:ReactAndroid:hermes-engine"))
+       }
+   }
+   ```
+2. Check `patches/react-native+<version>.patch` still applies (two files: the TextInput fix +
+   marker, and the `-ffile-prefix-map` cppFlags hunk). Bump the marker string if the fix changes.
+3. Build and publish:
+   ```sh
+   cd apps/physio/android
+   JAVA_HOME=<jdk17> ANDROID_HOME=<sdk> ./gradlew \
+     :react-native:packages:react-native:ReactAndroid:publishReleasePublicationToMavenTempLocalRepository
+   # -> /tmp/maven-local
+   ```
+4. Verify the marker is in the release AAR and that no `/Users/` paths remain.
+5. `cd /tmp/maven-local && zip -r -0 <name>.zip com`, `shasum -a 256`, then `gh release create`.
+6. Update `rnPatchedRelease` / `rnPatchedSha256` / `rnPatchedUrl` in the app's `settings.gradle`
+   and **revert step 1**.
+
+If patch-package fails while regenerating the patch, move the build leftovers aside first
+(`ReactAndroid/.cxx`, `ReactAndroid/build`, `hermes-engine/{.cxx,build}`, `sdks/hermes`,
+`sdks/download`, `.gradle`) and strip any `.gradle/**` sections from the generated patch.
